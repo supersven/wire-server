@@ -28,9 +28,19 @@ jobs:
 
       - name: Initialize public submodules
         run: |
-          # Initialize and update only public submodules
-          # Skip wire-server-enterprise as it's a private repository
-          git submodule update --init --recursive libs/wire-message-proto-lens/generic-message-proto || true
+          # Initialize submodules, skipping private ones that fail
+          # wire-server-enterprise is private and will fail without credentials
+          git submodule init
+          
+          # Update each submodule individually, continuing on failures for private repos
+          for submodule in $(git config --file .gitmodules --get-regexp path | awk '{ print $2 }'); do
+            echo "Attempting to update submodule: $submodule"
+            if git submodule update --recursive "$submodule" 2>&1; then
+              echo "Successfully updated: $submodule"
+            else
+              echo "Warning: Could not update $submodule (may be a private repository)"
+            fi
+          done
 
       - name: Install Nix
         uses: cachix/install-nix-action@v27
