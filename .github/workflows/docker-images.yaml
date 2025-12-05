@@ -57,10 +57,8 @@ jobs:
           fi
 
       - name: Build image list
-        id: image-list
         run: |
           nix build -f ./nix wireServer.imagesList -o ./image-list --fallback
-          echo "images=$(cat ./image-list | tr '\n' ' ')" >> $GITHUB_OUTPUT
 
       - name: Build and push Docker images
         env:
@@ -69,7 +67,7 @@ jobs:
           set -euo pipefail
           
           # Read the list of images
-          while IFS= read -r image_name; do
+          while IFS= read -r image_name || [[ -n "$image_name" ]]; do
             [[ -z "$image_name" ]] && continue
             
             echo "Building image: $image_name"
@@ -80,11 +78,14 @@ jobs:
             # Stream the image to a tar file
             "./result-$image_name" > "./image-$image_name.tar"
             
-            # Load the image into Docker
-            docker load < "./image-$image_name.tar"
+            # Load the image into Docker and capture the loaded image name
+            loaded_output=$(docker load < "./image-$image_name.tar")
+            original_image=$(echo "$loaded_output" | grep -oP 'Loaded image: \K.*' | head -1)
             
-            # Get the original image name from the tar
-            original_image=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "quay.io/wire/$image_name" | head -1)
+            if [[ -z "$original_image" ]]; then
+              # Fallback to searching for the image
+              original_image=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "^quay.io/wire/${image_name}:" | head -1)
+            fi
             
             if [[ -n "$original_image" ]]; then
               # Tag for GitHub Container Registry
@@ -97,18 +98,21 @@ jobs:
               if [[ "${{ github.event_name }}" != "pull_request" ]]; then
                 echo "Pushing $ghcr_image"
                 docker push "$ghcr_image"
+                # Clean up GHCR tagged image after push
+                docker rmi "$ghcr_image" 2>/dev/null || true
               else
                 echo "Skipping push for pull request (would push: $ghcr_image)"
               fi
+              
+              # Clean up original image
+              docker rmi "$original_image" 2>/dev/null || true
             else
               echo "Warning: Could not find loaded image for $image_name"
             fi
             
-            # Clean up to save disk space
+            # Clean up files to save disk space
             rm -f "./image-$image_name.tar"
             rm -f "./result-$image_name"
-            docker rmi "$original_image" 2>/dev/null || true
-            docker rmi "$ghcr_image" 2>/dev/null || true
             
           done < ./image-list
 
@@ -126,11 +130,14 @@ jobs:
           # Stream the image to a tar file
           ./result-nginz-image > ./image-nginz.tar
           
-          # Load the image into Docker
-          docker load < ./image-nginz.tar
+          # Load the image into Docker and capture the loaded image name
+          loaded_output=$(docker load < ./image-nginz.tar)
+          original_image=$(echo "$loaded_output" | grep -oP 'Loaded image: \K.*' | head -1)
           
-          # Get the original image name from the tar
-          original_image=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "quay.io/wire/nginz" | head -1)
+          if [[ -z "$original_image" ]]; then
+            # Fallback to searching for the image
+            original_image=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "^quay.io/wire/nginz:" | head -1)
+          fi
           
           if [[ -n "$original_image" ]]; then
             ghcr_image="${{ env.IMAGE_PREFIX }}/nginz:$DOCKER_TAG"
@@ -142,9 +149,12 @@ jobs:
             if [[ "${{ github.event_name }}" != "pull_request" ]]; then
               echo "Pushing $ghcr_image"
               docker push "$ghcr_image"
+              docker rmi "$ghcr_image" 2>/dev/null || true
             else
               echo "Skipping push for pull request (would push: $ghcr_image)"
             fi
+            
+            docker rmi "$original_image" 2>/dev/null || true
           else
             echo "Warning: Could not find loaded nginz image"
           fi
