@@ -1,0 +1,154 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+  pull_request:
+    branches:
+      - develop
+      - main
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set Docker tag
+        id: set-tag
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "tag=pr-${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "tag=latest" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            echo "tag=develop" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build image list
+        id: image-list
+        run: |
+          nix build -f ./nix wireServer.imagesList -o ./image-list --fallback
+          echo "images=$(cat ./image-list | tr '\n' ' ')" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker images
+        env:
+          DOCKER_TAG: ${{ steps.set-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          
+          # Read the list of images
+          while IFS= read -r image_name; do
+            [[ -z "$image_name" ]] && continue
+            
+            echo "Building image: $image_name"
+            
+            # Build the image using Nix
+            nix build -f ./nix "wireServer.imagesNoDocs.$image_name" -o "./result-$image_name" --fallback
+            
+            # Stream the image to a tar file
+            "./result-$image_name" > "./image-$image_name.tar"
+            
+            # Load the image into Docker
+            docker load < "./image-$image_name.tar"
+            
+            # Get the original image name from the tar
+            original_image=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "quay.io/wire/$image_name" | head -1)
+            
+            if [[ -n "$original_image" ]]; then
+              # Tag for GitHub Container Registry
+              ghcr_image="${{ env.IMAGE_PREFIX }}/$image_name:$DOCKER_TAG"
+              
+              echo "Tagging $original_image as $ghcr_image"
+              docker tag "$original_image" "$ghcr_image"
+              
+              # Push to GitHub Container Registry (only on non-PR events)
+              if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+                echo "Pushing $ghcr_image"
+                docker push "$ghcr_image"
+              else
+                echo "Skipping push for pull request (would push: $ghcr_image)"
+              fi
+            else
+              echo "Warning: Could not find loaded image for $image_name"
+            fi
+            
+            # Clean up to save disk space
+            rm -f "./image-$image_name.tar"
+            rm -f "./result-$image_name"
+            docker rmi "$original_image" 2>/dev/null || true
+            docker rmi "$ghcr_image" 2>/dev/null || true
+            
+          done < ./image-list
+
+      - name: Build and push nginz image
+        env:
+          DOCKER_TAG: ${{ steps.set-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          
+          echo "Building nginz image"
+          
+          # Build nginz Docker image using Nix (defined in nix/nginz.nix, exposed via nix/default.nix)
+          nix build -f ./nix nginz -o ./result-nginz-image --fallback
+          
+          # Stream the image to a tar file
+          ./result-nginz-image > ./image-nginz.tar
+          
+          # Load the image into Docker
+          docker load < ./image-nginz.tar
+          
+          # Get the original image name from the tar
+          original_image=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "quay.io/wire/nginz" | head -1)
+          
+          if [[ -n "$original_image" ]]; then
+            ghcr_image="${{ env.IMAGE_PREFIX }}/nginz:$DOCKER_TAG"
+            
+            echo "Tagging $original_image as $ghcr_image"
+            docker tag "$original_image" "$ghcr_image"
+            
+            # Push to GitHub Container Registry (only on non-PR events)
+            if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+              echo "Pushing $ghcr_image"
+              docker push "$ghcr_image"
+            else
+              echo "Skipping push for pull request (would push: $ghcr_image)"
+            fi
+          else
+            echo "Warning: Could not find loaded nginz image"
+          fi
+          
+          # Clean up
+          rm -f ./image-nginz.tar
+          rm -f ./result-nginz-image
