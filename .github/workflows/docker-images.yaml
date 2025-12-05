@@ -25,8 +25,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Initialize public submodules
+        run: |
+          # Initialize and update only public submodules
+          # Skip wire-server-enterprise as it's a private repository
+          git submodule update --init --recursive libs/wire-message-proto-lens/generic-message-proto || true
 
       - name: Install Nix
         uses: cachix/install-nix-action@v27
@@ -66,9 +70,15 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Read the list of images
+          # Read the list of images, excluding wire-server-enterprise (private repo)
           while IFS= read -r image_name || [[ -n "$image_name" ]]; do
             [[ -z "$image_name" ]] && continue
+            
+            # Skip wire-server-enterprise as it requires private submodule
+            if [[ "$image_name" == "wire-server-enterprise" ]]; then
+              echo "Skipping $image_name (requires private repository)"
+              continue
+            fi
             
             echo "Building image: $image_name"
             
