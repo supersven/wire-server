@@ -25,22 +25,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Initialize public submodules
-        run: |
-          # Initialize submodules, skipping private ones that fail
-          # wire-server-enterprise is private and will fail without credentials
-          git submodule init
-          
-          # Update each submodule individually, continuing on failures for private repos
-          for submodule in $(git config --file .gitmodules --get-regexp path | awk '{ print $2 }'); do
-            echo "Attempting to update submodule: $submodule"
-            if git submodule update --recursive "$submodule" 2>&1; then
-              echo "Successfully updated: $submodule"
-            else
-              echo "Warning: Could not update $submodule (may be a private repository)"
-            fi
-          done
+        with:
+          submodules: recursive
+          # Use a token with access to private repositories for submodule checkout
+          # The WIRE_PRIVATE_REPO_TOKEN secret must be configured with access to wireapp/wire-server-enterprise
+          token: ${{ secrets.WIRE_PRIVATE_REPO_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Install Nix
         uses: cachix/install-nix-action@v27
@@ -80,15 +69,9 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Read the list of images, excluding wire-server-enterprise (private repo)
+          # Read the list of images
           while IFS= read -r image_name || [[ -n "$image_name" ]]; do
             [[ -z "$image_name" ]] && continue
-            
-            # Skip wire-server-enterprise as it requires private submodule
-            if [[ "$image_name" == "wire-server-enterprise" ]]; then
-              echo "Skipping $image_name (requires private repository)"
-              continue
-            fi
             
             echo "Building image: $image_name"
             
